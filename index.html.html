@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Road Audit – GBA South</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+:root{--bg:#10151c;--card:#1a222d;--tx:#e8edf3;--mu:#8a98a8;--ac:#2fb67c;--bad:#e5484d;--warn:#f5a524}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px system-ui,sans-serif}
+header{padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--card)}
+h1{font-size:16px;margin:0;flex:1 1 100%}
+input,select,button{font:inherit;padding:9px 10px;border-radius:8px;border:1px solid #2c3948;background:#0e131a;color:var(--tx)}
+button{cursor:pointer;background:#243142}button.p{background:var(--ac);color:#04140d;border:0;font-weight:600}
+button.d{background:var(--bad);border:0}
+#vw{position:relative;background:#000}video,canvas{width:100%;display:block;max-height:50vh;object-fit:contain}
+canvas{position:absolute;left:0;top:0;height:100%;pointer-events:none}
+#st{position:absolute;left:8px;top:8px;background:#000a;padding:4px 8px;border-radius:6px;font-size:12px}
+main{padding:12px}#map{height:42vh;background:#1a222d}.leaflet-container{font:12px system-ui}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+#grid button{padding:12px 6px}
+#cond{display:none;margin:10px 0;padding:10px;background:var(--card);border-radius:10px}
+#cond b{display:block;margin-bottom:8px}#cond button{margin-right:6px}
+.g{background:#1f6f4f}.f{background:#8a6a12}.b{background:#8f2b2e}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+td,th{padding:5px;border-bottom:1px solid #2c3948;text-align:left}th{color:var(--mu)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.mu{color:var(--mu);font-size:12px}
+</style></head><body>
+<header>
+<h1>Road Audit · GBA South City Corporation</h1>
+<input id="sv" placeholder="Surveyor name" size="12">
+<input id="rd" placeholder="Road / ward name" size="18">
+<button class="p" id="go">Start camera + GPS</button>
+<label class="mu"><input type="checkbox" id="ai"> Auto-detect (signals, stop signs, parking meters)</label>
+</header>
+<div id="vw"><video id="v" autoplay playsinline muted></video><canvas id="c"></canvas><div id="st">Idle</div></div>
+<div id="map"></div>
+<main>
+<div class="mu">Tap an asset when you pass it. Location and time are stamped automatically. Position is also tracked every 2 s for the route line.</div>
+<div id="cond"><b id="ct"></b>
+<button class="g" data-c="Good">Good</button><button class="f" data-c="Fair">Fair</button><button class="b" data-c="Poor">Poor</button>
+<button data-c="Missing">Missing / needed</button><button id="cx">Cancel</button></div>
+<div id="grid" style="margin-top:10px"></div>
+<div class="row">
+<button class="p" id="csv">Export CSV</button><button class="p" id="geo">Export GeoJSON</button><button class="p" id="gpx">Export route GPX</button><button id="fit">Fit map to data</button>
+<button id="undo">Undo last</button><button class="d" id="clr">Clear all</button></div>
+<div id="sum" class="mu"></div>
+<table><thead><tr><th>Time</th><th>Asset</th><th>Condition</th><th>Src</th><th>Lat, Lng</th></tr></thead><tbody id="tb"></tbody></table>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+const ASSETS=["Pothole","Footpath","Carriageway","Streetlight pole","Utility pole","Streetlight on utility pole","Traffic signal","Traffic sign","Signboard","Wayfinding board","On-street parking","Drain / manhole","Road marking","Speed breaker","Crossing","Encroachment","Tree / obstruction","Bus stop","Other"];
+const $=id=>document.getElementById(id);
+let log=[],track=[],pos=null,pending=null,model=null,aiTimer=null,watch=null;
+try{log=JSON.parse(localStorage.getItem("ra_log")||"[]");track=JSON.parse(localStorage.getItem("ra_trk")||"[]")}catch(e){}
+function save(){try{localStorage.setItem("ra_log",JSON.stringify(log));localStorage.setItem("ra_trk",JSON.stringify(track.slice(-20000)))}catch(e){}}
+$("grid").innerHTML=ASSETS.map(a=>`<button data-a="${a}">${a}</button>`).join("");
+$("grid").onclick=e=>{const a=e.target.dataset.a;if(!a)return;pending=a;$("ct").textContent=a+" – condition?";$("cond").style.display="block"};
+$("cx").onclick=()=>{pending=null;$("cond").style.display="none"};
+$("cond").onclick=e=>{const c=e.target.dataset.c;if(c&&pending){add(pending,c,"manual");pending=null;$("cond").style.display="none"}};
+function add(asset,cond,src,conf){
+  if(!pos){alert("No GPS fix yet – start GPS first (or wait a few seconds).");return}
+  log.push({t:new Date().toISOString(),asset,cond,src,conf:conf||"",lat:pos.latitude,lng:pos.longitude,acc:Math.round(pos.accuracy),spd:pos.speed==null?"":+(pos.speed*3.6).toFixed(1),hdg:pos.heading==null?"":Math.round(pos.heading),road:$("rd").value,by:$("sv").value});
+  save();render();
+}
+function render(){
+  $("tb").innerHTML=log.slice(-30).reverse().map(r=>`<tr><td>${r.t.slice(11,19)}</td><td>${r.asset}</td><td>${r.cond}</td><td>${r.src}</td><td>${(+r.lat).toFixed(5)}, ${(+r.lng).toFixed(5)}</td></tr>`).join("");
+  const n={};log.forEach(r=>n[r.asset]=(n[r.asset]||0)+1);
+  $("sum").textContent=`${log.length} records · ${track.length} track points · `+Object.entries(n).map(([k,v])=>k+": "+v).join(" · ");
+  drawMap();
+}
+$("undo").onclick=()=>{log.pop();save();render()};
+$("clr").onclick=()=>{if(confirm("Delete ALL records? Export first!")){log=[];track=[];save();render()}};
+function dl(name,txt,type){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([txt],{type}));a.download=name;a.click()}
+const stamp=()=>new Date().toISOString().slice(0,16).replace(/[:T]/g,"-");
+$("csv").onclick=()=>{const h=["t","asset","cond","src","conf","lat","lng","acc","spd","hdg","road","by"];
+  dl(`road-audit-${stamp()}.csv`,[h.join(",")].concat(log.map(r=>h.map(k=>`"${String(r[k]).replace(/"/g,'""')}"`).join(","))).join("\n"),"text/csv")};
+$("geo").onclick=()=>{const f=log.map(r=>({type:"Feature",geometry:{type:"Point",coordinates:[+r.lng,+r.lat]},properties:r}));
+  if(track.length>1)f.push({type:"Feature",geometry:{type:"LineString",coordinates:track.map(p=>[p[1],p[0]])},properties:{kind:"route"}});
+  dl(`road-audit-${stamp()}.geojson`,JSON.stringify({type:"FeatureCollection",features:f}),"application/geo+json")};
+$("go").onclick=async()=>{
+  try{const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1280}},audio:false});$("v").srcObject=s}catch(e){alert("Camera error: "+e.message)}
+  if(watch==null)watch=navigator.geolocation.watchPosition(p=>{pos=p.coords;$("st").textContent=`GPS ±${Math.round(pos.accuracy)} m`},e=>$("st").textContent="GPS: "+e.message,{enableHighAccuracy:true,maximumAge:1000});
+  setInterval(()=>{if(pos){track.push([pos.latitude,pos.longitude,Date.now()]);save();mapTick()}},2000);
+  $("go").disabled=true;
+};
+// Optional auto-detection with generic COCO model (no potholes/poles/footpaths – needs a custom model)
+const MAP={"traffic light":"Traffic signal","stop sign":"Traffic sign","parking meter":"On-street parking"};
+function ls(src){return new Promise((r,j)=>{const s=document.createElement("script");s.src=src;s.onload=r;s.onerror=j;document.head.appendChild(s)})}
+$("ai").onchange=async e=>{
+  if(!e.target.checked){clearInterval(aiTimer);$("c").getContext("2d").clearRect(0,0,9999,9999);return}
+  try{$("st").textContent="Loading model…";
+    if(!model){await ls("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");await ls("https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js");model=await cocoSsd.load()}
+    aiTimer=setInterval(detect,600);$("st").textContent="Auto-detect on"}
+  catch(err){alert("Could not load model (needs internet): "+err);e.target.checked=false}
+};
+const seen={};
+async function detect(){
+  const v=$("v"),c=$("c");if(!v.videoWidth||!model)return;
+  c.width=v.videoWidth;c.height=v.videoHeight;const x=c.getContext("2d");x.clearRect(0,0,c.width,c.height);
+  const out=await model.detect(v);
+  x.lineWidth=3;x.font="18px sans-serif";
+  for(const d of out){if(d.score<0.5)continue;const a=MAP[d.class];
+    x.strokeStyle=a?"#2fb67c":"#ffffff55";x.strokeRect(...d.bbox);
+    if(a){x.fillStyle="#2fb67c";x.fillText(`${a} ${(d.score*100)|0}%`,d.bbox[0]+4,d.bbox[1]+20);
+      const k=a+(pos?(pos.latitude*4000|0)+","+(pos.longitude*4000|0):"");
+      if(pos&&(!seen[k]||Date.now()-seen[k]>15000)){seen[k]=Date.now();add(a,"Unrated","auto",(d.score*100|0)+"%")}}}
+}
+// ---- Map (OpenStreetMap base; tiles need internet, data is still saved offline) ----
+let map=null,line=null,grp=null,follow=true;
+const COL={Good:"#2fb67c",Fair:"#f5a524",Poor:"#e5484d",Missing:"#a855f7",Unrated:"#3b82f6"};
+if(window.L){
+  map=L.map("map").setView([12.89,77.59],12);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap"}).addTo(map);
+  line=L.polyline([],{color:"#38bdf8",weight:4}).addTo(map);grp=L.layerGroup().addTo(map);
+  map.on("dragstart",()=>follow=false);
+}
+function drawMap(){
+  if(!map)return;
+  line.setLatLngs(track.map(p=>[p[0],p[1]]));grp.clearLayers();
+  log.forEach(r=>L.circleMarker([r.lat,r.lng],{radius:7,color:"#fff",weight:1,fillColor:COL[r.cond]||"#999",fillOpacity:.9})
+    .bindPopup(`<b>${r.asset}</b><br>${r.cond} (${r.src})<br>${r.t.slice(11,19)}`).addTo(grp));
+}
+function mapTick(){
+  if(!map||!pos)return;
+  line.addLatLng([pos.latitude,pos.longitude]);
+  if(follow)map.setView([pos.latitude,pos.longitude],Math.max(map.getZoom(),17));
+}
+function fitAll(){
+  if(!map)return;follow=false;
+  const pts=track.map(p=>[p[0],p[1]]).concat(log.map(r=>[r.lat,r.lng]));
+  if(pts.length)map.fitBounds(pts,{padding:[20,20]});
+}
+$("fit").onclick=fitAll;
+$("gpx").onclick=()=>{
+  const t=track.map(p=>`<trkpt lat="${p[0]}" lon="${p[1]}"><time>${new Date(p[2]).toISOString()}</time></trkpt>`).join("");
+  const w=log.map(r=>`<wpt lat="${r.lat}" lon="${r.lng}"><time>${r.t}</time><name>${r.asset} (${r.cond})</name></wpt>`).join("");
+  dl(`road-audit-${stamp()}.gpx`,`<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="road-audit" xmlns="http://www.topografix.com/GPX/1/1">${w}<trk><trkseg>${t}</trkseg></trk></gpx>`,"application/gpx+xml");
+};
+render();fitAll();
+</script></body></html>
